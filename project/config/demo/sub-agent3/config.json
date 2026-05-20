@@ -1,0 +1,7 @@
+{
+  "name": "sub-agent3",
+  "provider": "openai",
+  "model": "gpt-4.1-mini",
+  "api_key_env": "OPENAI_API_KEY",
+  "role": "用户价值审查者，关注目标用户、使用场景和最终交付价值。"
+}

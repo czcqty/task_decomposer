@@ -1,0 +1,7 @@
+{
+  "name": "sub-agent2",
+  "provider": "claude",
+  "model": "claude-3-5-haiku-latest",
+  "api_key_env": "ANTHROPIC_API_KEY",
+  "role": "风险审查者，关注遗漏、依赖、风险和验收标准。"
+}

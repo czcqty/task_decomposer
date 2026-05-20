@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+project/users/
+project/conversation/**/*.jsonl
+project/output/**/*.md
+project/output/**/*.json
+project/cache/**/*.json
+project/log/**/*.jsonl
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
