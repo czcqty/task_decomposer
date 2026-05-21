@@ -41,6 +41,7 @@ from task_decomposer_app.runtime import (
 )
 from task_decomposer_app.search import SearchService
 from task_decomposer_app.skills import SkillRegistry
+from task_decomposer_app.terminal_input import TerminalInputConfig, read_mode_input, read_text_input, _vt_supported
 
 try:
     from dotenv import load_dotenv
@@ -185,7 +186,7 @@ def main() -> None:
         return
 
     if not goal:
-        goal = input("请输入你想拆解或修改的目标：").strip()
+        goal = read_text_input("请输入你想拆解或修改的目标：").strip()
     if not run_goal_once(args, registry, project, runtime_project, project_name, project_ref, goal):
         raise SystemExit(1)
 
@@ -209,11 +210,13 @@ def run_interactive_loop(
 
     print_interactive_frame(project_name, args.conversation)
     goal = initial_goal
+    if goal:
+        WELCOME_ANIMATION_STATE.clear()
     input_mode = "chat"
     while True:
         if not goal:
             try:
-                input_mode, user_input = read_mode_input(input_mode)
+                input_mode, user_input = read_mode_input(input_mode, terminal_input_config())
             except (EOFError, KeyboardInterrupt):
                 print()
                 return
@@ -222,6 +225,7 @@ def run_interactive_loop(
             user_input = user_input.strip()
             if not user_input:
                 continue
+            WELCOME_ANIMATION_STATE.clear()
             if input_mode == "console" or user_input.startswith("/"):
                 should_exit = handle_interactive_command(user_input, args, project_name)
                 if should_exit:
@@ -244,7 +248,10 @@ def print_interactive_frame(project_name: str, conversation_id: str, active_mode
     console_print("")
     line_count = print_welcome_panel(project_name, conversation_id, active_mode)
     remember_welcome_animation(project_name, conversation_id, active_mode, line_count)
-    colored_print("  chat> 输入要拆解的目标。按 Tab 切换到 console>，输入 /help 查看命令。", MUTED_COLOR)
+    if active_mode == "console":
+        colored_print("  console> 输入内置命令。按 Tab 切换到 chat>，输入 /help 查看命令。", MUTED_COLOR)
+    else:
+        colored_print("  chat> 输入要拆解的目标。按 Tab 切换到 console>，输入 /help 查看命令。", MUTED_COLOR)
     console_print("")
 
 
@@ -355,6 +362,7 @@ def print_welcome_panel(project_name: str, conversation_id: str, active_mode: st
     ]
     right_lines = [
         "Tips for getting started",
+        f"active input: {active_mode}>",
         "chat> 直接输入目标，让 agent 拆解任务",
         "按 Tab 切换到 console> 输入命令",
         "常用命令：/status · /switch <id> · /new [id]",
@@ -393,13 +401,15 @@ def remember_welcome_animation(project_name: str, conversation_id: str, active_m
     )
 
 
-def refresh_welcome_animation(mode: str, buffer: list[str], cursor: int, *, force: bool = False) -> None:
+def refresh_welcome_animation(mode: str, *, force: bool = False) -> bool:
     if not WELCOME_ANIMATION_STATE or not color_enabled():
-        return
+        return False
+    if not _vt_supported():
+        return False
     now = time.monotonic()
     last_tick = float(WELCOME_ANIMATION_STATE.get("last_tick", 0.0))
     if not force and now - last_tick < WELCOME_ANIMATION_INTERVAL:
-        return
+        return False
 
     WELCOME_ANIMATION_STATE["last_tick"] = now
     WELCOME_ANIMATION_STATE["active_mode"] = mode
@@ -407,19 +417,29 @@ def refresh_welcome_animation(mode: str, buffer: list[str], cursor: int, *, forc
     WELCOME_ANIMATION_STATE["frame"] = frame
     line_count = int(WELCOME_ANIMATION_STATE.get("line_count", 0))
     if line_count <= 0:
-        return
+        return False
 
     project_name = str(WELCOME_ANIMATION_STATE.get("project_name", "default"))
     conversation_id = str(WELCOME_ANIMATION_STATE.get("conversation_id", "default"))
     active_mode = str(WELCOME_ANIMATION_STATE.get("active_mode", mode))
     lines_to_panel_top = line_count + 2
-    sys.stdout.write(f"\r{ANSI_CLEAR_TO_END}\033[{lines_to_panel_top}A")
+    # Cleanly clear the entire region from the top of the welcome panel to the bottom of the terminal before drawing.
+    sys.stdout.write(f"\r\033[{lines_to_panel_top}A\033[J")
     sys.stdout.flush()
     new_line_count = print_welcome_panel(project_name, conversation_id, active_mode, mascot_frame=frame)
     WELCOME_ANIMATION_STATE["line_count"] = new_line_count
-    colored_print("  chat> 输入要拆解的目标。按 Tab 切换到 console>，输入 /help 查看命令。", MUTED_COLOR)
+    if active_mode == "console":
+        colored_print("  console> 输入内置命令。按 Tab 切换到 chat>，输入 /help 查看命令。", MUTED_COLOR)
+    else:
+        colored_print("  chat> 输入要拆解的目标。按 Tab 切换到 console>，输入 /help 查看命令。", MUTED_COLOR)
     console_print("")
-    redraw_input_line(mode, buffer, cursor)
+    return True
+
+
+def update_welcome_animation_mode(mode: str) -> None:
+    if WELCOME_ANIMATION_STATE:
+        WELCOME_ANIMATION_STATE["active_mode"] = mode
+        refresh_welcome_animation(mode, force=True)
 
 
 def print_result_workspace(
@@ -590,199 +610,16 @@ def color_enabled() -> bool:
     return sys.stdout.isatty()
 
 
-def read_mode_input(mode: str) -> tuple[str, str | None]:
-    if not sys.stdin.isatty():
-        return mode, input(mode_prompt(mode))
-
-    if os.name == "nt":
-        return read_mode_input_windows(mode)
-    return read_mode_input_posix(mode)
-
-
-def read_mode_input_windows(mode: str) -> tuple[str, str | None]:
-    import msvcrt
-
-    buffer: list[str] = []
-    cursor = 0
-    redraw_input_line(mode, buffer, cursor)
-    while True:
-        if not msvcrt.kbhit():
-            refresh_welcome_animation(mode, buffer, cursor)
-            time.sleep(0.03)
-            continue
-        char = msvcrt.getwch()
-        if char in {"\r", "\n"}:
-            WELCOME_ANIMATION_STATE.clear()
-            sys.stdout.write(ANSI_RESET + "\n")
-            sys.stdout.flush()
-            return mode, "".join(buffer)
-        if char == "\x03":
-            sys.stdout.write(ANSI_RESET)
-            sys.stdout.flush()
-            raise KeyboardInterrupt
-        if char == "\t" and not buffer:
-            mode = toggle_input_mode(mode)
-            WELCOME_ANIMATION_STATE["active_mode"] = mode
-            redraw_input_line(mode, buffer, cursor)
-            continue
-        if char in {"\b", "\x7f"}:
-            if cursor > 0:
-                buffer.pop(cursor - 1)
-                cursor -= 1
-                redraw_input_line(mode, buffer, cursor)
-            continue
-        if char == "\x00" or char == "\xe0":
-            key = msvcrt.getwch()
-            if key == "K" and cursor > 0:
-                cursor -= 1
-                redraw_input_line(mode, buffer, cursor)
-            elif key == "M" and cursor < len(buffer):
-                cursor += 1
-                redraw_input_line(mode, buffer, cursor)
-            elif key == "S" and cursor < len(buffer):
-                buffer.pop(cursor)
-                redraw_input_line(mode, buffer, cursor)
-            elif key == "G":
-                cursor = 0
-                redraw_input_line(mode, buffer, cursor)
-            elif key == "O":
-                cursor = len(buffer)
-                redraw_input_line(mode, buffer, cursor)
-            continue
-        buffer.insert(cursor, char)
-        cursor += 1
-        redraw_input_line(mode, buffer, cursor)
-
-
-def read_mode_input_posix(mode: str) -> tuple[str, str | None]:
-    import select
-    import termios
-    import tty
-
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    buffer: list[str] = []
-    cursor = 0
-    redraw_input_line(mode, buffer, cursor)
-    try:
-        tty.setraw(fd)
-        while True:
-            ready, _, _ = select.select([sys.stdin], [], [], 0.03)
-            if not ready:
-                refresh_welcome_animation(mode, buffer, cursor)
-                continue
-            char = sys.stdin.read(1)
-            if char in {"\r", "\n"}:
-                WELCOME_ANIMATION_STATE.clear()
-                sys.stdout.write(ANSI_RESET + "\n")
-                sys.stdout.flush()
-                return mode, "".join(buffer)
-            if char == "\x03":
-                sys.stdout.write(ANSI_RESET)
-                sys.stdout.flush()
-                raise KeyboardInterrupt
-            if char == "\x04":
-                sys.stdout.write(ANSI_RESET)
-                sys.stdout.flush()
-                raise EOFError
-            if char == "\t" and not buffer:
-                mode = toggle_input_mode(mode)
-                WELCOME_ANIMATION_STATE["active_mode"] = mode
-                redraw_input_line(mode, buffer, cursor)
-                continue
-            if char in {"\x7f", "\b"}:
-                if cursor > 0:
-                    buffer.pop(cursor - 1)
-                    cursor -= 1
-                    redraw_input_line(mode, buffer, cursor)
-                continue
-            if char == "\x1b":
-                sequence = sys.stdin.read(2)
-                if sequence == "[D" and cursor > 0:
-                    cursor -= 1
-                    redraw_input_line(mode, buffer, cursor)
-                elif sequence == "[C" and cursor < len(buffer):
-                    cursor += 1
-                    redraw_input_line(mode, buffer, cursor)
-                elif sequence == "[H":
-                    cursor = 0
-                    redraw_input_line(mode, buffer, cursor)
-                elif sequence == "[F":
-                    cursor = len(buffer)
-                    redraw_input_line(mode, buffer, cursor)
-                elif sequence == "[1":
-                    sys.stdin.read(1)
-                    cursor = 0
-                    redraw_input_line(mode, buffer, cursor)
-                elif sequence == "[4":
-                    sys.stdin.read(1)
-                    cursor = len(buffer)
-                    redraw_input_line(mode, buffer, cursor)
-                elif sequence == "[3":
-                    suffix = sys.stdin.read(1)
-                    if suffix == "~" and cursor < len(buffer):
-                        buffer.pop(cursor)
-                        redraw_input_line(mode, buffer, cursor)
-                continue
-            buffer.insert(cursor, char)
-            cursor += 1
-            redraw_input_line(mode, buffer, cursor)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-
-def redraw_input_line(mode: str, buffer: list[str], cursor: int) -> None:
-    color = CHAT_COLOR if mode == "chat" else CONSOLE_COLOR
-    prompt = mode_prompt(mode)
-    text = "".join(buffer)
-    line = prompt + text
-    if color_enabled():
-        sys.stdout.write(f"\r{color}{line}{ANSI_RESET}{ANSI_CLEAR_TO_END}")
-    else:
-        sys.stdout.write(f"\r{line}{ANSI_CLEAR_TO_END}")
-    suffix_width = visual_width("".join(buffer[cursor:]))
-    if suffix_width:
-        sys.stdout.write(f"\033[{suffix_width}D")
-    sys.stdout.flush()
-
-
-def clear_input_line(mode: str, buffer: list[str]) -> None:
-    color = CHAT_COLOR if mode == "chat" else CONSOLE_COLOR
-    line = mode_prompt(mode) + "".join(buffer)
-    blank = " " * visual_width(line)
-    if color_enabled():
-        sys.stdout.write(f"\r{color}{blank}{ANSI_RESET}\r")
-    else:
-        sys.stdout.write(f"\r{blank}\r")
-    sys.stdout.flush()
-
-
-def write_prompt(mode: str) -> None:
-    color = CHAT_COLOR if mode == "chat" else CONSOLE_COLOR
-    prompt = mode_prompt(mode)
-    if color_enabled():
-        sys.stdout.write(f"{color}{prompt}")
-    else:
-        sys.stdout.write(prompt)
-    sys.stdout.flush()
-
-
-def mode_prompt(mode: str) -> str:
-    return f"{mode}> "
-
-
-def toggle_input_mode(mode: str) -> str:
-    return "console" if mode == "chat" else "chat"
-
-
-def colored_input(prompt: str, color: str) -> str:
-    if not color_enabled():
-        return input(prompt)
-    try:
-        return input(f"{color}{prompt}")
-    finally:
-        sys.stdout.write(ANSI_RESET)
-        sys.stdout.flush()
+def terminal_input_config() -> TerminalInputConfig:
+    return TerminalInputConfig(
+        chat_color=CHAT_COLOR,
+        console_color=CONSOLE_COLOR,
+        reset=ANSI_RESET,
+        clear_to_end=ANSI_CLEAR_TO_END,
+        color_enabled=color_enabled,
+        idle_callback=refresh_welcome_animation,
+        mode_changed_callback=update_welcome_animation_mode,
+    )
 
 
 def console_print(message: str = "") -> None:
@@ -1000,7 +837,7 @@ def _run_goal_once(
                 print("\n这个目标还有一点模糊，可以先补充以下信息：")
                 for index, question in enumerate(questions, start=1):
                     print(f"{index}. {question}")
-                user_context = input("\n请输入补充信息，或直接回车跳过：").strip()
+                user_context = read_text_input("\n请输入补充信息，或直接回车跳过：").strip()
                 context = "\n\n".join(part for part in [context, user_context] if part)
 
     try:
@@ -1120,6 +957,38 @@ def configure_stdio() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8")
+    if os.name == "nt":
+        _enable_windows_vt_processing()
+
+
+def _enable_windows_vt_processing() -> None:
+    """Enable ANSI / VT escape sequence processing on Windows.
+
+    Without this flag the console prints escape codes as literal text,
+    which breaks \033[K (clear to end of line), \033[nD (cursor left),
+    colour codes, and every other ANSI sequence the app relies on.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        STD_OUTPUT_HANDLE = -11
+        STD_ERROR_HANDLE = -12
+
+        for handle_id in (STD_OUTPUT_HANDLE, STD_ERROR_HANDLE):
+            handle = kernel32.GetStdHandle(handle_id)
+            if handle == -1:
+                continue
+            mode = wintypes.DWORD()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                continue
+            new_mode = mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            kernel32.SetConsoleMode(handle, new_mode)
+    except Exception:
+        pass
 
 
 def setup_user_config(args: argparse.Namespace, force: bool = False) -> None:
@@ -1127,7 +996,7 @@ def setup_user_config(args: argparse.Namespace, force: bool = False) -> None:
     if not user_name:
         if not sys.stdin.isatty():
             return
-        user_name = input("请输入用户名称：").strip()
+        user_name = read_text_input("请输入用户名称：").strip()
         args.user = user_name
     if not user_name:
         return
@@ -1182,7 +1051,7 @@ def apply_user_config(config: UserRuntimeConfig) -> None:
 def prompt_provider(default_provider: str) -> str:
     fallback = "deepseek" if (default_provider or "auto") == "auto" else default_provider
     while True:
-        raw_value = input(f"请选择模型供应商 openai/claude/deepseek/custom [{fallback}]：").strip() or fallback
+        raw_value = read_text_input(f"请选择模型供应商 openai/claude/deepseek/custom [{fallback}]：").strip() or fallback
         try:
             provider = normalize_provider(raw_value)
         except RuntimeError as error:
