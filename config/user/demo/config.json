@@ -1,0 +1,9 @@
+{
+  "name": "demo",
+  "api_keys": {},
+  "search": {
+    "provider": "duckduckgo",
+    "api_keys": {},
+    "max_results": 5
+  }
+}

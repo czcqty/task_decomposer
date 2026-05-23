@@ -9,6 +9,8 @@ ENTRY = ROOT / "task_decomposer.py"
 
 
 def run_command(args: list[str]) -> subprocess.CompletedProcess[str]:
+    if "--user" not in args:
+        args = [*args, "--user", "demo"]
     result = subprocess.run(
         [sys.executable, "-B", str(ENTRY), *args],
         cwd=ROOT,
@@ -54,8 +56,8 @@ def main() -> None:
             ]
         )
 
-        output_dir = Path(runtime) / "output" / "demo"
-        log_path = Path(runtime) / "log" / "demo" / "runs.jsonl"
+        output_dir = Path(runtime) / "user" / "demo" / "project" / "demo" / "output"
+        log_path = Path(runtime) / "user" / "demo" / "project" / "demo" / "log" / "runs.jsonl"
         if not list(output_dir.glob("*.md")) or not list(output_dir.glob("*.json")):
             raise SystemExit("local demo did not export markdown/json plans")
         if not log_path.exists():

@@ -340,11 +340,11 @@ def local_decompose_for_sub_agent(
 def skills_from_role(spec: SubAgentSpec) -> list[Skill]:
     role = spec.role
     if "风险" in role or "审查" in role or "验收" in role:
-        return [Skill(name="risk-review", content="", path="", scope="generated", owner=spec.name)]
+        return [Skill(name="risk-review", content="", path="")]
     if "执行" in role or "MVP" in role or "里程碑" in role:
-        return [Skill(name="execution", content="", path="", scope="generated", owner=spec.name)]
+        return [Skill(name="execution", content="", path="")]
     if "用户" in role or "价值" in role or "场景" in role:
-        return [Skill(name="user-value", content="", path="", scope="generated", owner=spec.name)]
+        return [Skill(name="user-value", content="", path="")]
     return []
 
 

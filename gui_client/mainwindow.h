@@ -13,7 +13,6 @@
 #include <QResizeEvent>
 #include <QSplitter>
 
-
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -37,51 +36,38 @@ private:
     void initUI();
     void applyTheme();
     void startBackendProcess();
+    void loadMascotFromJson();
+    void logMascotLoader(const QString &msg);
     void sendCommandToBackend(const QJsonObject &json);
 
-    // 终端模拟器渲染
+    // 终端与主界面渲染（通过富文本 HTML）
     void printWelcomePanel(int frame);
     void printResultWorkspace();
-    void printSplitPanel(const QString &title, const QStringList &leftLines, const QStringList &rightLines);
     void printHelp();
     void printStatus();
     
-    // 输入与命令处理
+    // 输入与指令处理
     void handleInput(const QString &input);
     void executeSlashCommand(const QString &cmd, const QString &args);
+    void handleMascotCommand(const QString &args);
     void appendTerminalText(const QString &text, const QString &colorHtml);
     void appendLeftText(const QString &text, const QString &colorHtml);
     void appendRightText(const QString &text, const QString &colorHtml);
     void updatePrompt();
 
-    // 视觉排版对齐计算（兼容中英文等宽排列）
-    int terminalUiWidth() const;
-    int visualWidth(const QString &text) const;
-    QString truncateVisual(const QString &text, int width) const;
-    QString padVisual(const QString &text, int width) const;
-    QString padVisualUntruncated(const QString &text, int width) const;
-    QStringList wrapVisual(const QString &text, int width) const;
-    QString centerVisual(const QString &text, int width) const;
-
-    // UFO ASCII Mascot 牵引光束吸人逐帧绘制器
-    QStringList renderDefaultMascotFrame(int frame, int width) const;
-    void drawBeam(QVector<QString> &canvas, int center, int phase) const;
-    void drawWalkingPerson(QVector<QString> &canvas, int row, int col, int phase) const;
-    void drawPerson(QVector<QString> &canvas, int row, int col) const;
-    void drawSmallPerson(QVector<QString> &canvas, int row, int col) const;
-    void overlay(QVector<QString> &canvas, int row, int col, const QString &text) const;
+    QStringList renderMascotFrame(int frame) const;
 
     // UI 组件
     QSplitter *m_splitter;
     QTextEdit *m_leftDisplay;
-
     QTextEdit *m_rightDisplay;
     QLabel *m_promptLabel;
     QLineEdit *m_terminalInput;
 
-    // 后端进程与动画计时器
+    // 后端进程与本地动画计时器
     QProcess *m_process;
     QTimer *m_mascotTimer;
+    QVector<QStringList> m_customMascotFrames;
 
     // 运行状态与配置
     QString m_currentMode;      // "chat" 或 "console"
@@ -90,7 +76,7 @@ private:
     int m_mascotFrame;          // Mascot 动画当前帧
     bool m_isShowingWelcome;    // 是否处于欢迎动画界面
     
-    // 缓存最近一次拆解的运行数据以用于渲染
+    // 缓存数据（核心引擎事件传递过来后缓存起来，直接用 HTML 渲染出来）
     double m_lastElapsed;
     int m_lastTokens;
     QString m_lastTokenNote;

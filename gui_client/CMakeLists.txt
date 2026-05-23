@@ -14,19 +14,13 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-# 优先查找 Qt 6，找不到则自动降级查找 Qt 5
-find_package(Qt6 COMPONENTS Widgets Core Gui QUIET)
-if(Qt6_FOUND)
-    message(STATUS "发现 Qt 6，链接 Qt6 库")
-    set(QT_LIBRARIES Qt6::Widgets Qt6::Core Qt6::Gui)
-    # Qt6 可能会由于模块导出名字有细微变动，这里做一个统一处理
-    if (TARGET Qt6::Widgets)
-        set(QT_LIBRARIES Qt6::Widgets)
-    endif()
-else()
-    find_package(Qt5 COMPONENTS Widgets Core Gui REQUIRED)
-    message(STATUS "未发现 Qt 6，链接 Qt5 库")
-    set(QT_LIBRARIES Qt5::Widgets Qt5::Core Qt5::Gui)
+# 查找 Qt 6 (必须使用 Qt6)
+find_package(Qt6 COMPONENTS Widgets Core Gui REQUIRED)
+message(STATUS "发现 Qt 6，链接 Qt6 库")
+set(QT_LIBRARIES Qt6::Widgets Qt6::Core Qt6::Gui)
+# Qt6 可能会由于模块导出名字有细微变动，这里做一个统一处理
+if (TARGET Qt6::Widgets)
+    set(QT_LIBRARIES Qt6::Widgets)
 endif()
 
 add_executable(TaskDecomposerGUI
@@ -36,3 +30,10 @@ add_executable(TaskDecomposerGUI
 )
 
 target_link_libraries(TaskDecomposerGUI PRIVATE ${QT_LIBRARIES})
+
+# 自动拷贝 Qt 平台插件到生成的可执行文件目录，解决插件加载失败错误
+add_custom_command(TARGET TaskDecomposerGUI POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "D:/ProgramData/vcpkg/installed/x64-windows/$<IF:$<CONFIG:Debug>,debug/,>Qt6/plugins/platforms"
+        "$<TARGET_FILE_DIR:TaskDecomposerGUI>/platforms"
+)

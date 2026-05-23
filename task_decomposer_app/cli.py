@@ -13,7 +13,8 @@ from pathlib import Path
 from task_decomposer_app.agent import TaskDecomposerAgent
 from task_decomposer_app.config import PROVIDER_DEFAULTS, normalize_provider, resolve_provider, resolve_search_config
 from task_decomposer_app.llm import LLMClient
-from task_decomposer_app.mascot import render_mascot_frame
+from task_decomposer_app.cli_renderer import render_mascot_frame
+from task_decomposer_app import core_engine
 from task_decomposer_app.models import SubAgentSpec
 from task_decomposer_app.project import ProjectConfig, ProjectSubAgentConfig, load_project_config, project_root_for_create
 from task_decomposer_app.runtime import (
@@ -74,13 +75,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--setup-user", action="store_true", help="创建或更新用户级 API Key 配置后退出")
 
     parser.add_argument("--global-skill", action="append", default=[], help="加载全局 Skill，可重复使用，也可用逗号分隔")
-    parser.add_argument("--skills-dir", default=os.getenv("SKILLS_DIR", "skills"), help="Skills 根目录")
-    parser.add_argument("--list-skills", action="store_true", help="列出全局 Skills 后退出")
+    parser.add_argument("--config-dir", dest="config_dir", default="config", help="配置与定义根目录")
+    parser.add_argument("--skills-dir", dest="config_dir", help=argparse.SUPPRESS)
 
-    parser.add_argument("--project", default=os.getenv("PROJECT_NAME"), help="项目名，默认解析为 skills/project/<项目名>")
-    parser.add_argument("--project-dir", default=os.getenv("PROJECT_DIR"), help="项目 skills 目录路径；通常建议使用 --project")
-    parser.add_argument("--init-project", help="创建项目 skills 模板。简单名称会创建到 skills/project/<名称>")
-    parser.add_argument("--list-project-skills", action="store_true", help="列出项目 main/sub-agent skills 后退出")
+    parser.add_argument("--project", default="demo", help="项目名，默认解析为 config/user/<user>/project/<项目名>")
+    parser.add_argument("--project-dir", default=None, help="项目配置目录路径；通常建议使用 --project")
+    parser.add_argument("--init-project", help="创建项目配置与技能模板。")
+    parser.add_argument("--list-project-skills", action="store_true", help="列出项目 main/sub-agent 技能后退出")
     parser.add_argument("--sub-agent", action="append", default=[], help="临时追加 sub-agent，格式：name:role")
     parser.add_argument(
         "--sub-agent-mode",
@@ -89,11 +90,11 @@ def parse_args() -> argparse.Namespace:
         help="sub-agent 运行策略：all、risk-only、auto",
     )
 
-    parser.add_argument("--runtime-dir", default=os.getenv("RUNTIME_DIR", "project"), help="运行态目录，保存 conversation、config、output、cache、log")
+    parser.add_argument("--runtime-dir", default=os.getenv("RUNTIME_DIR", "runtime"), help="运行态目录，保存 conversation、cache、log、output")
     parser.add_argument("--init-runtime", action="store_true", help="初始化运行态目录模板后退出")
     parser.add_argument("--conversation", default=os.getenv("CONVERSATION_ID", ""), help="对话 ID；设置后会加载并保存多轮修改历史")
     parser.add_argument("--feedback", default="", help="本轮修改意见，可与 --conversation 一起使用")
-    parser.add_argument("--validate-project", action="store_true", help="校验项目 skills、agent 配置和运行态目录后退出")
+    parser.add_argument("--validate-project", action="store_true", help="校验项目 config、agent 配置和运行态目录后退出")
     parser.add_argument("--dry-run", action="store_true", help="预览本次运行会加载的项目、skills、sub-agent、模型和搜索配置后退出")
     parser.add_argument("--cache-list", action="store_true", help="列出当前项目的搜索缓存后退出")
     parser.add_argument("--cache-clear", action="store_true", help="清空当前项目的搜索缓存后退出")
@@ -111,7 +112,7 @@ def main() -> None:
         load_dotenv()
 
     args = parse_args()
-    registry = SkillRegistry(args.skills_dir)
+    registry = SkillRegistry(args.config_dir)
 
     if args.setup_user:
         setup_user_config(args, force=True)
@@ -123,7 +124,7 @@ def main() -> None:
         return
 
     if args.init_project:
-        init_project_template(args.init_project, args.skills_dir)
+        init_project_template(args.init_project, args.config_dir)
         return
 
     project_ref = args.project_dir or args.project
@@ -133,9 +134,11 @@ def main() -> None:
 
     run_id = runtime_timestamp()
     timer = start_timer()
+    user_config_root = Path(args.config_dir) / "user" / args.user
     try:
-        project = load_project_config(project_ref, args.skills_dir)
-        runtime_project = load_runtime_project(project.name if project else args.project, args.runtime_dir)
+        project = load_project_config(project_ref, str(user_config_root))
+        project_root = user_config_root / "project" / (project.name if project else args.project)
+        runtime_project = load_runtime_project(project.name if project else args.project, project_root)
     except Exception as error:
         if args.dry_run:
             print(f"Dry run 失败：{error}")
@@ -156,19 +159,16 @@ def main() -> None:
     project_name = project.name if project else (args.project or "default")
 
     if args.cache_list:
-        ensure_project_runtime_dirs(args.runtime_dir, project_name)
-        print_cache_entries(args.runtime_dir, project_name)
+        ensure_project_runtime_dirs(args.runtime_dir, args.user, project_name)
+        print_cache_entries(args.runtime_dir, args.user, project_name)
         return
 
     if args.cache_clear:
-        ensure_project_runtime_dirs(args.runtime_dir, project_name)
-        removed = clear_cache(args.runtime_dir, project_name)
+        ensure_project_runtime_dirs(args.runtime_dir, args.user, project_name)
+        removed = clear_cache(args.runtime_dir, args.user, project_name)
         print(f"已清空缓存：project={project_name}，删除文件数={removed}")
         return
 
-    if args.list_skills:
-        print_available_skills(registry)
-        return
 
     if args.list_project_skills:
         print_project_skills(registry, project)
@@ -179,7 +179,7 @@ def main() -> None:
         print_dry_run(registry, args, project, runtime_project, project_name, goal)
         return
 
-    ensure_project_runtime_dirs(args.runtime_dir, project_name)
+    ensure_project_runtime_dirs(args.runtime_dir, args.user, project_name)
 
     if should_run_interactive(args):
         run_interactive_loop(args, registry, project, runtime_project, project_name, project_ref, goal)
@@ -747,166 +747,25 @@ def _run_goal_once(
     project_ref: str | None,
     goal: str,
 ) -> bool:
-    run_id = runtime_timestamp()
-    timer = start_timer()
-
     if not goal:
         print("目标不能为空。")
         return False
 
-    interactive_run_status(args, "✻ Preparing…")
-    if not args.local:
-        try:
-            setup_user_config(args)
-        except Exception as error:
-            print(f"用户级配置不可用：{error}")
-            return False
-        checks = validate_project(args, project_ref, require_api_keys=True) if project_ref else []
-        blocking = [message for level, message in checks if level == "ERROR"]
-        if blocking:
-            print_configuration_diagnostics(args, project_ref, checks)
-            log_path = append_failure_log(
-                args.runtime_dir,
-                project_name,
-                run_id,
-                goal,
-                "configuration",
-                "模型配置未通过校验",
-                elapsed_since(timer),
-                mode="model",
-            )
-            print(f"运行失败，已写入失败日志：{log_path}")
-            return False
+    def status_callback(stage, message):
+        interactive_run_status(args, f"运行中：{message}")
 
     try:
-        interactive_run_status(args, "✻ Loading project context…")
-        llm_client = build_llm_client(args, runtime_project.main if runtime_project else None)
-        main_skills = load_main_skills(registry, args, project)
-        sub_agents = load_sub_agents(registry, args, project, runtime_project, goal)
-        search_service = build_search_service(args, project_name)
+        result_dict = core_engine.run_core_decomposition(
+            args=args,
+            goal=goal,
+            status_callback=status_callback,
+            prompt_api_key_callback=read_text_input
+        )
+        print_run_result_dict(result_dict)
+        return True
     except Exception as error:
-        if not args.local:
-            print_configuration_diagnostics(args, project_ref)
-        log_path = append_failure_log(
-            args.runtime_dir,
-            project_name,
-            run_id,
-            goal,
-            "runtime-build",
-            error,
-            elapsed_since(timer),
-        )
-        print(f"运行失败，已写入失败日志：{log_path}")
+        print(f"运行失败：{error}")
         return False
-
-    print_runtime_info(llm_client, main_skills, sub_agents, search_service, project, args.runtime_dir, runtime_project is not None)
-
-    agent = TaskDecomposerAgent(
-        llm_client=llm_client,
-        search_service=search_service,
-        skills=main_skills,
-        sub_agents=sub_agents,
-    )
-
-    context = build_conversation_context(args, project, project_name)
-    clarify_questions: list[str] = []
-
-    if not args.skip_clarify:
-        try:
-            with animated_run_status(args, "Clarifying…"):
-                questions = agent.clarify(goal)
-        except Exception as error:
-            print(f"模型澄清失败：{error}")
-            print_configuration_diagnostics(args, project_ref)
-            log_path = append_failure_log(
-                args.runtime_dir,
-                project_name,
-                run_id,
-                goal,
-                "clarify",
-                error,
-                elapsed_since(timer),
-                mode="model",
-            )
-            print(f"运行失败，已写入失败日志：{log_path}")
-            return False
-
-        if questions:
-            clarify_questions = questions
-            if not getattr(args, "_interactive_color", False):
-                print("\n这个目标还有一点模糊，可以先补充以下信息：")
-                for index, question in enumerate(questions, start=1):
-                    print(f"{index}. {question}")
-                user_context = read_text_input("\n请输入补充信息，或直接回车跳过：").strip()
-                context = "\n\n".join(part for part in [context, user_context] if part)
-
-    try:
-        detail = "local demo" if args.local else "model"
-        with animated_run_status(args, f"Synthesizing… ({detail})"):
-            result = agent.run(goal, context=context, search_query=args.search_query)
-    except Exception as error:
-        print(f"模型拆解失败：{error}")
-        print_configuration_diagnostics(args, project_ref)
-        log_path = append_failure_log(
-            args.runtime_dir,
-            project_name,
-            run_id,
-            goal,
-            "agent-run",
-            error,
-            elapsed_since(timer),
-            mode="model",
-        )
-        print(f"运行失败，已写入失败日志：{log_path}")
-        return False
-    elapsed_seconds = elapsed_since(timer)
-    token_count = run_token_count(llm_client, result, goal, context)
-    token_note = " estimated" if llm_client is None or getattr(llm_client, "total_tokens", 0) <= 0 else ""
-
-    mode = "local" if agent.llm_client is None else "model"
-    try:
-        if args.conversation:
-            saved_path = append_conversation(args.runtime_dir, project_name, args.conversation, goal, context, result)
-            print(f"对话已保存：{saved_path}")
-
-        exported = export_plan(args.runtime_dir, project_name, result, run_id=run_id)
-        log_path = append_run_log(
-            args.runtime_dir,
-            project_name,
-            run_id,
-            goal,
-            result,
-            elapsed_seconds,
-            mode=mode,
-        )
-    except Exception as error:
-        log_path = append_failure_log(
-            args.runtime_dir,
-            project_name,
-            run_id,
-            goal,
-            "persist-result",
-            error,
-            elapsed_since(timer),
-            mode=mode,
-        )
-        print(f"结果保存失败，已写入失败日志：{log_path}")
-        return False
-    print(f"计划已导出：{exported['markdown']}")
-    print(f"运行日志已写入：{log_path}")
-
-    args._last_result = result
-    args._last_goal = goal
-    args._last_questions = clarify_questions
-    args._last_elapsed_seconds = elapsed_seconds
-    args._last_token_count = token_count
-    args._last_token_note = token_note
-
-    if getattr(args, "_interactive_color", False):
-        console_print(f"✻ Done ({format_duration(elapsed_seconds)} · {format_token_count(token_count)} tokens{token_note})")
-    else:
-        print_run_result(result)
-    return True
 
 
 def interactive_run_status(args: argparse.Namespace, message: str) -> None:
@@ -1105,107 +964,6 @@ def build_conversation_context(
     return f"以下是本次多轮修改的历史上下文，请基于它继续修改计划：\n{history_context}"
 
 
-def build_llm_client(args: argparse.Namespace, runtime_main_config=None) -> LLMClient | None:
-    if args.local:
-        return None
-
-    config = resolve_runtime_provider(runtime_main_config) if runtime_main_config else None
-    if config is None:
-        config = resolve_provider(args.provider, args.model, args.base_url)
-    if config is None:
-        raise RuntimeError("未检测到可用模型供应商配置。请先配置 API Key，或显式使用 --local 进入本地演示模式。")
-
-    return LLMClient(config) if config else None
-
-
-class CachedSearchService:
-    def __init__(self, service: SearchService, runtime_root: str, project_name: str):
-        self.service = service
-        self.runtime_root = runtime_root
-        self.project_name = project_name
-        self.config = service.config
-
-    def search(self, query: str):
-        cached = load_cached_search_results(
-            self.runtime_root,
-            self.project_name,
-            self.config.provider,
-            query,
-            self.config.max_results,
-        )
-        if cached is not None:
-            return cached
-        results = self.service.search(query)
-        save_cached_search_results(
-            self.runtime_root,
-            self.project_name,
-            self.config.provider,
-            query,
-            self.config.max_results,
-            results,
-        )
-        return results
-
-
-def build_search_service(args: argparse.Namespace, project_name: str) -> SearchService | None:
-    if not args.search:
-        return None
-
-    try:
-        config = resolve_search_config(args.search, args.search_provider, args.max_results)
-    except Exception as error:
-        print(f"搜索配置不可用，已关闭联网搜索：{error}")
-        return None
-
-    return CachedSearchService(SearchService(config), args.runtime_dir, project_name)
-
-
-def load_main_skills(registry: SkillRegistry, args: argparse.Namespace, project: ProjectConfig | None) -> list:
-    skills = registry.load_global(args.global_skill)
-    if project is None:
-        return skills
-
-    project_main_skills = registry.load_project_agent_skills(str(project.root), "main", project.main_skills or None)
-    return skills + project_main_skills
-
-
-def load_sub_agents(
-    registry: SkillRegistry,
-    args: argparse.Namespace,
-    project: ProjectConfig | None,
-    runtime_project=None,
-    goal: str = "",
-) -> list[SubAgentSpec]:
-    specs: list[ProjectSubAgentConfig] = []
-    if project is not None:
-        specs.extend(project.sub_agents)
-    specs.extend(parse_cli_sub_agents(args.sub_agent))
-
-    specs = filter_sub_agent_specs(specs, args.sub_agent_mode, goal)
-
-    sub_agents: list[SubAgentSpec] = []
-    for spec in specs:
-        runtime_config = runtime_project.agents.get(spec.name) if runtime_project else None
-        skills = []
-        if project is not None:
-            skills = registry.load_project_agent_skills(str(project.root), spec.name, spec.skills or None)
-
-        model_config = None
-        if runtime_config and not args.local:
-            model_config = resolve_runtime_provider(runtime_config)
-
-        sub_agents.append(
-            SubAgentSpec(
-                name=spec.name,
-                role=runtime_config.role if runtime_config and runtime_config.role else spec.role,
-                skills=skills,
-                model_config=model_config,
-                provider=runtime_config.provider if runtime_config else "",
-            )
-        )
-    return sub_agents
-
-
 def filter_sub_agent_specs(
     specs: list[ProjectSubAgentConfig],
     mode: str,
@@ -1262,8 +1020,8 @@ def parse_cli_sub_agents(values: list[str]) -> list[ProjectSubAgentConfig]:
     return specs
 
 
-def init_project_template(project_ref: str, skills_dir: str) -> None:
-    root = project_root_for_create(project_ref, skills_dir)
+def init_project_template(project_ref: str, config_dir: str) -> None:
+    root = project_root_for_create(project_ref, config_dir)
     root.mkdir(parents=True, exist_ok=True)
     files = {
         root / "main" / "planning" / "SKILL.md": "# Planning Skill\n\n主 Agent 使用：负责综合目标、搜索结果和 sub-agent 建议，输出最终执行计划。\n",
@@ -1274,21 +1032,11 @@ def init_project_template(project_ref: str, skills_dir: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_text(content, encoding="utf-8")
-    print(f"已创建项目 skills 模板：{root}")
+    print(f"已创建项目配置与技能模板：{root}")
 
 
-def print_available_skills(registry: SkillRegistry) -> None:
-    names = registry.list_global_skills()
-    if not names:
-        print("当前没有可用全局 Skills。")
-        return
-    print("可用全局 Skills：")
-    for name in names:
-        print(f"- {name}")
-
-
-def print_cache_entries(runtime_dir: str, project_name: str) -> None:
-    entries = list_cache_entries(runtime_dir, project_name)
+def print_cache_entries(runtime_dir: str, username: str, project_name: str) -> None:
+    entries = list_cache_entries(runtime_dir, username, project_name)
     if not entries:
         print(f"当前项目没有缓存：{project_name}")
         return
@@ -1348,7 +1096,7 @@ def print_dry_run(
 
     if args.search:
         query = args.search_query or goal
-        cache_summary = dry_run_cache_summary(args.runtime_dir, project_name)
+        cache_summary = dry_run_cache_summary(args.runtime_dir, args.user, project_name)
         print(f"联网搜索：启用 provider={args.search_provider} max_results={args.max_results} query={query or '未提供'}")
         print(f"搜索缓存：{cache_summary}")
     else:
@@ -1379,8 +1127,8 @@ def print_agent_dry_run(agent_name: str, config, skills: list[str] | None = None
     )
 
 
-def dry_run_cache_summary(runtime_dir: str, project_name: str) -> str:
-    path = Path(runtime_dir) / "cache" / project_name / "search.json"
+def dry_run_cache_summary(runtime_dir: str, username: str, project_name: str) -> str:
+    path = Path(runtime_dir) / "user" / username / "project" / project_name / "cache" / "search.json"
     if not path.exists():
         return f"无缓存文件 ({path})"
     try:
@@ -1399,7 +1147,7 @@ def dry_run_cache_summary(runtime_dir: str, project_name: str) -> str:
 
 
 def print_project_validation(args: argparse.Namespace, project_ref: str | None) -> None:
-    checks = validate_project(args, project_ref)
+    checks = core_engine.validate_project(args, project_ref)
     project_name = args.project or (Path(project_ref).name if project_ref else "default")
     print(f"项目校验：{project_name}")
     for level, message in checks:
@@ -1420,7 +1168,7 @@ def print_configuration_diagnostics(
     if args.local:
         return
     print("\n配置检查结果：")
-    checks = checks if checks is not None else validate_project(args, project_ref, require_api_keys=True)
+    checks = checks if checks is not None else core_engine.validate_project(args, project_ref, require_api_keys=True)
     if not checks:
         print("[ERROR] 未找到可校验的项目配置")
     for level, message in checks:
@@ -1432,129 +1180,6 @@ def print_configuration_diagnostics(
     print("- 如果只是想看本地演示结果，请显式加 --local")
     if project_ref:
         print(f"- 查看完整项目检查：python task_decomposer.py --project {args.project or project_ref} --validate-project")
-
-
-def validate_project(
-    args: argparse.Namespace,
-    project_ref: str | None,
-    require_api_keys: bool = False,
-) -> list[tuple[str, str]]:
-    checks: list[tuple[str, str]] = []
-    if not project_ref:
-        return [("ERROR", "请通过 --project 或 --project-dir 指定项目")]
-
-    try:
-        project = load_project_config(project_ref, args.skills_dir)
-    except Exception as error:
-        return [("ERROR", f"项目 skills 不可用：{error}")]
-
-    if project is None:
-        return [("ERROR", "项目 skills 不可用")]
-
-    checks.append(("OK", f"项目 skills 目录：{project.root}"))
-    main_root = project.root / "main"
-    if not main_root.exists():
-        checks.append(("ERROR", f"缺少主 agent skills 目录：{main_root}"))
-    elif not project.main_skills:
-        checks.append(("WARN", f"主 agent 没有可用 skill：{main_root}"))
-    else:
-        checks.append(("OK", f"主 agent skills：{', '.join(project.main_skills)}"))
-
-    project_agent_names = {sub_agent.name for sub_agent in project.sub_agents}
-    for sub_agent in project.sub_agents:
-        if sub_agent.skills:
-            checks.append(("OK", f"{sub_agent.name} skills：{', '.join(sub_agent.skills)}"))
-        else:
-            checks.append(("WARN", f"{sub_agent.name} 没有可用 skill"))
-
-    config_root = Path(args.runtime_dir) / "config" / project.name
-    if not config_root.exists():
-        checks.append(("ERROR", f"缺少项目配置目录：{config_root}，可先运行 --init-runtime --project {project.name}"))
-    else:
-        checks.append(("OK", f"项目配置目录：{config_root}"))
-        validate_agent_config(checks, config_root / "main" / "config.json", "main", require_api_keys)
-        for agent_name in sorted(project_agent_names):
-            validate_agent_config(checks, config_root / agent_name / "config.json", agent_name, require_api_keys)
-
-        config_agent_names = {
-            path.name
-            for path in config_root.iterdir()
-            if path.is_dir() and path.name != "main"
-        }
-        for agent_name in sorted(config_agent_names - project_agent_names):
-            checks.append(("WARN", f"配置存在但 skills 中没有对应 sub-agent：{agent_name}"))
-
-    for dirname in ["conversation", "output", "cache", "log"]:
-        path = Path(args.runtime_dir) / dirname / project.name
-        if path.exists():
-            checks.append(("OK", f"运行态目录存在：{path}"))
-        else:
-            checks.append(("WARN", f"运行态目录不存在：{path}，正常运行时会自动创建"))
-
-    return checks
-
-
-def validate_agent_config(
-    checks: list[tuple[str, str]],
-    path: Path,
-    agent_name: str,
-    require_api_keys: bool = False,
-) -> None:
-    if not path.exists():
-        checks.append(("ERROR", f"缺少 {agent_name} 配置文件：{path}"))
-        return
-
-    try:
-        config = load_agent_runtime_config(path)
-    except Exception as error:
-        checks.append(("ERROR", f"{agent_name} 配置无法读取：{path}，{error}"))
-        return
-
-    if config is None:
-        checks.append(("ERROR", f"{agent_name} 配置为空：{path}"))
-        return
-
-    checks.append(("OK", f"{agent_name} 配置文件：{path}"))
-    if config.name != agent_name:
-        checks.append(("WARN", f"{agent_name} 配置中的 name 是 {config.name}"))
-    if not config.enabled:
-        checks.append(("WARN", f"{agent_name} 当前 enabled=false，不会参与运行"))
-    if not config.provider:
-        checks.append(("ERROR", f"{agent_name} 缺少 provider"))
-    if not config.model:
-        checks.append(("ERROR", f"{agent_name} 缺少 model"))
-
-    env_names = []
-    if config.api_key_env:
-        env_names.append(config.api_key_env)
-    env_names.extend(config.api_key_envs)
-    if not env_names:
-        checks.append(("ERROR", f"{agent_name} 缺少 api_key_env 或 api_key_envs"))
-        return
-
-    detected_values = [os.getenv(name) for name in env_names if os.getenv(name)]
-    if not detected_values:
-        level = "ERROR" if require_api_keys else "WARN"
-        checks.append((level, f"{agent_name} 未检测到 API Key 环境变量：{', '.join(env_names)}"))
-        return
-
-    placeholder_values = [value for value in detected_values if is_placeholder_api_key(value)]
-    if placeholder_values:
-        level = "ERROR" if require_api_keys else "WARN"
-        checks.append((level, f"{agent_name} API Key 看起来仍是示例占位值，请替换为真实 key：{', '.join(env_names)}"))
-
-
-def is_placeholder_api_key(value: str) -> bool:
-    lowered = value.strip().lower()
-    if lowered.startswith("your_") or lowered in {"changeme", "replace_me", "test", "demo"}:
-        return True
-    if lowered.startswith("sk-"):
-        body = lowered[3:]
-        for size in range(16, min(64, len(body) // 2) + 1):
-            chunk = body[:size]
-            if body.count(chunk) >= 3:
-                return True
-    return False
 
 
 def print_project_skills(registry: SkillRegistry, project: ProjectConfig | None) -> None:
@@ -1603,6 +1228,17 @@ def print_runtime_info(
 
     if search_service is not None:
         print(f"联网搜索：已启用（{search_service.config.provider}）")
+
+
+def print_run_result_dict(result_dict: dict) -> None:
+    plan = result_dict.get("plan", {})
+    print("\n=== 任务拆解结果 ===")
+    print(f"目标：{plan.get('goal', '')}\n")
+    for index, task in enumerate(plan.get("tasks", []), start=1):
+        print(f"{index}. {task.get('title', '')}")
+        print(f"   行动：{task.get('action', '')}")
+        print(f"   产出：{task.get('output', '')}")
+    print(f"\n下一步建议：{plan.get('next_step', '')}")
 
 
 def print_run_result(result) -> None:

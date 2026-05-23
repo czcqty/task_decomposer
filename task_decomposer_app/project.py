@@ -17,7 +17,7 @@ class ProjectConfig:
     sub_agents: list[ProjectSubAgentConfig] = field(default_factory=list)
 
 
-def resolve_project_root(project_ref: str | None, skills_root: str = "skills") -> Path | None:
+def resolve_project_root(project_ref: str | None, config_root: str = "config") -> Path | None:
     if not project_ref:
         return None
 
@@ -25,22 +25,22 @@ def resolve_project_root(project_ref: str | None, skills_root: str = "skills") -
     if ref_path.exists():
         return ref_path
 
-    project_path = Path(skills_root) / "project" / project_ref
+    project_path = Path(config_root) / "project" / project_ref
     if project_path.exists():
         return project_path
 
-    raise RuntimeError(f"项目不存在：{project_ref}。请使用 skills/project/<项目名> 结构。")
+    raise RuntimeError(f"项目不存在：{project_ref}。请使用 {config_root}/user/<user>/project/<项目名> 结构。")
 
 
-def project_root_for_create(project_ref: str, skills_root: str = "skills") -> Path:
+def project_root_for_create(project_ref: str, config_root: str = "config") -> Path:
     ref_path = Path(project_ref)
     if ref_path.parent != Path(".") or ref_path.is_absolute():
         return ref_path
-    return Path(skills_root) / "project" / project_ref
+    return Path(config_root) / "project" / project_ref
 
 
-def load_project_config(project_ref: str | None, skills_root: str = "skills") -> ProjectConfig | None:
-    root = resolve_project_root(project_ref, skills_root)
+def load_project_config(project_ref: str | None, config_root: str = "config") -> ProjectConfig | None:
+    root = resolve_project_root(project_ref, config_root)
     if root is None:
         return None
 
@@ -48,7 +48,7 @@ def load_project_config(project_ref: str | None, skills_root: str = "skills") ->
     sub_agents = [
         ProjectSubAgentConfig(name=path.name, skills=list_agent_skill_names(path))
         for path in sorted(root.iterdir())
-        if path.is_dir() and path.name != "main"
+        if path.is_dir() and path.name != "main" and path.name != "demo_pristine"
     ]
     return ProjectConfig(name=root.name, root=root, main_skills=main_skills, sub_agents=sub_agents)
 

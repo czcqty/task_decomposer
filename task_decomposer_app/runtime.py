@@ -1,5 +1,6 @@
 import json
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from task_decomposer_app.utils import first_env
 
 
 SEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60
+CACHE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -37,15 +39,55 @@ class RuntimeProjectConfig:
 class UserRuntimeConfig:
     name: str
     provider: str = ""
-    api_keys: dict[str, str] = field(default_factory=dict)
+    api_keys: dict[str, list[str]] = field(default_factory=dict)
     model: str = ""
     base_url: str = ""
+    raw_data: dict = field(default_factory=dict)
 
 
-def ensure_runtime_template(runtime_root: str = "project", project_name: str = "demo") -> None:
-    root = Path(runtime_root)
+class KeyRotator:
+    def __init__(self):
+        self._lock = threading.Lock()
+
+    def _get_state_path(self, username: str) -> Path:
+        return Path("runtime") / "user" / username / "key_rotation_state.json"
+
+    def get_key(self, username: str, provider: str, keys: list[str]) -> str:
+        if not keys:
+            raise RuntimeError(f"用户 {username} 未配置 {provider} 的 API Key。")
+        
+        if len(keys) == 1:
+            return keys[0]
+
+        with self._lock:
+            state_path = self._get_state_path(username)
+            state = {}
+            if state_path.exists():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+            
+            current_index = state.get(provider, 0)
+            selected_key = keys[current_index % len(keys)]
+            state[provider] = (current_index + 1) % len(keys)
+            
+            try:
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
+            return selected_key
+
+
+KEY_ROTATOR = KeyRotator()
+
+
+def ensure_runtime_template(config_root: str = "config", username: str = "demo", project_name: str = "demo") -> None:
+    # config/user/[username]/project/[projectname]
+    root = Path(config_root) / "user" / username / "project" / project_name
     files = {
-        root / "config" / project_name / "main" / "config.json": {
+        root / "main" / "config.json": {
             "name": "main",
             "provider": "deepseek",
             "model": "deepseek-chat",
@@ -53,7 +95,7 @@ def ensure_runtime_template(runtime_root: str = "project", project_name: str = "
             "api_key_env": "DEEPSEEK_API_KEY",
             "role": "主 Agent，负责综合 sub-agent 建议并输出最终任务拆解。",
         },
-        root / "config" / project_name / "sub-agent1" / "config.json": {
+        root / "sub-agent1" / "config.json": {
             "name": "sub-agent1",
             "provider": "deepseek",
             "model": "deepseek-chat",
@@ -61,7 +103,7 @@ def ensure_runtime_template(runtime_root: str = "project", project_name: str = "
             "api_key_env": "DEEPSEEK_API_KEY",
             "role": "执行路径设计者，关注任务顺序、MVP 和里程碑。",
         },
-        root / "config" / project_name / "sub-agent2" / "config.json": {
+        root / "sub-agent2" / "config.json": {
             "name": "sub-agent2",
             "provider": "claude",
             "model": "claude-3-5-haiku-latest",
@@ -73,42 +115,55 @@ def ensure_runtime_template(runtime_root: str = "project", project_name: str = "
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    ensure_project_runtime_dirs(runtime_root, project_name)
+    ensure_project_runtime_dirs("runtime", username, project_name)
 
 
-def ensure_project_runtime_dirs(runtime_root: str, project_name: str) -> None:
-    root = Path(runtime_root)
-    for dirname in ["conversation", "output", "cache", "log"]:
-        target = root / dirname / project_name
+def ensure_project_runtime_dirs(runtime_root: str, username: str, project_name: str) -> None:
+    # runtime/user/[username]/project/[projectname]/[dirname]
+    root = Path(runtime_root) / "user" / username / "project" / project_name
+    for dirname in ["cache", "conversation", "log", "output"]:
+        target = root / dirname
         target.mkdir(parents=True, exist_ok=True)
         keep = target / ".gitkeep"
         if not keep.exists():
             keep.write_text("", encoding="utf-8")
 
 
-def user_config_path(runtime_root: str, user_name: str) -> Path:
+def user_config_path(config_root: str, user_name: str) -> Path:
     safe_name = user_name.strip().replace("/", "_").replace("\\", "_")
-    return Path(runtime_root) / "users" / safe_name / "config.json"
+    return Path(config_root) / "user" / safe_name / "config.json"
 
 
-def load_user_runtime_config(runtime_root: str, user_name: str | None) -> UserRuntimeConfig | None:
+def load_user_runtime_config(config_root: str, user_name: str | None) -> UserRuntimeConfig | None:
     if not user_name:
         return None
-    path = user_config_path(runtime_root, user_name)
+    path = user_config_path(config_root, user_name)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    api_keys = {}
+    for provider, val in data.get("api_keys", {}).items():
+        if isinstance(val, list):
+            api_keys[provider] = [str(k) for k in val]
+        else:
+            api_keys[provider] = [str(val)]
+
     return UserRuntimeConfig(
-        name=str(data.get("name") or user_name),
+        name=user_name,
         provider=str(data.get("provider") or ""),
-        api_keys={str(key): str(value) for key, value in data.get("api_keys", {}).items()},
+        api_keys=api_keys,
         model=str(data.get("model") or ""),
         base_url=str(data.get("base_url") or ""),
+        raw_data=data
     )
 
 
-def save_user_runtime_config(runtime_root: str, config: UserRuntimeConfig) -> Path:
-    path = user_config_path(runtime_root, config.name)
+def save_user_runtime_config(config_root: str, config: UserRuntimeConfig) -> Path:
+    path = user_config_path(config_root, config.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "name": config.name,
@@ -116,6 +171,7 @@ def save_user_runtime_config(runtime_root: str, config: UserRuntimeConfig) -> Pa
         "api_keys": config.api_keys,
         "model": config.model,
         "base_url": config.base_url,
+        "search": config.raw_data.get("search", {}) if isinstance(config.raw_data, dict) else {}
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
@@ -125,18 +181,14 @@ def runtime_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
-def load_runtime_project(project_name: str | None, runtime_root: str = "project") -> RuntimeProjectConfig | None:
-    if not project_name:
-        return None
-
-    config_root = Path(runtime_root) / "config" / project_name
-    if not config_root.exists():
+def load_runtime_project(project_name: str | None, config_root: Path) -> RuntimeProjectConfig | None:
+    if not project_name or not config_root.exists():
         return None
 
     main = load_agent_runtime_config(config_root / "main" / "config.json")
     agents: dict[str, AgentRuntimeConfig] = {}
     for path in sorted(config_root.iterdir()):
-        if not path.is_dir() or path.name == "main":
+        if not path.is_dir() or path.name == "main" or path.name == "demo_pristine":
             continue
         config = load_agent_runtime_config(path / "config.json")
         if config is not None and config.enabled:
@@ -160,15 +212,26 @@ def load_agent_runtime_config(path: Path) -> AgentRuntimeConfig | None:
     )
 
 
-def resolve_runtime_provider(config: AgentRuntimeConfig | None) -> ProviderConfig | None:
+def resolve_runtime_provider(config: AgentRuntimeConfig | None, user_config: UserRuntimeConfig | None = None) -> ProviderConfig | None:
     if config is None or not config.provider:
         return None
 
-    env_names = []
-    if config.api_key_env:
-        env_names.append(config.api_key_env)
-    env_names.extend(config.api_key_envs)
-    api_key = first_env(env_names)
+    api_key = None
+    if user_config is not None:
+        keys = user_config.api_keys.get(config.provider, [])
+        if keys:
+            api_key = KEY_ROTATOR.get_key(user_config.name, config.provider, keys)
+            
+    if not api_key:
+        env_names = []
+        if config.api_key_env:
+            env_names.append(config.api_key_env)
+        env_names.extend(config.api_key_envs)
+        api_key = first_env(env_names)
+
+    if not api_key and user_config is not None and user_config.name == "demo":
+        api_key = "demo_mock_key"
+
     if not api_key:
         raise RuntimeError(f"未检测到 {config.name} 的 API Key：{', '.join(env_names) or '未配置 api_key_env'}")
 
@@ -180,39 +243,43 @@ def resolve_runtime_provider(config: AgentRuntimeConfig | None) -> ProviderConfi
     )
 
 
-def conversation_path(runtime_root: str, project_name: str, conversation_id: str) -> Path:
+def conversation_path(runtime_root: str, username: str, project_name: str, conversation_id: str) -> Path:
     safe_id = conversation_id.replace("/", "_").replace("\\", "_")
-    return Path(runtime_root) / "conversation" / project_name / f"{safe_id}.jsonl"
+    return Path(runtime_root) / "user" / username / "project" / project_name / "conversation" / f"{safe_id}.jsonl"
 
 
-def load_conversation_context(runtime_root: str, project_name: str, conversation_id: str) -> str:
-    path = conversation_path(runtime_root, project_name, conversation_id)
+def load_conversation_context(runtime_root: str, username: str, project_name: str, conversation_id: str) -> str:
+    path = conversation_path(runtime_root, username, project_name, conversation_id)
     if not path.exists():
         return ""
 
     lines = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines()[-6:]:
-        if not raw_line.strip():
-            continue
-        item = json.loads(raw_line)
-        lines.append(
-            "历史轮次：\n"
-            f"用户目标/修改：{item.get('goal', '')}\n"
-            f"最终目标：{item.get('plan', {}).get('goal', '')}\n"
-            f"下一步：{item.get('plan', {}).get('next_step', '')}"
-        )
+    try:
+        for raw_line in path.read_text(encoding="utf-8").splitlines()[-6:]:
+            if not raw_line.strip():
+                continue
+            item = json.loads(raw_line)
+            lines.append(
+                "历史轮次：\n"
+                f"用户目标/修改：{item.get('goal', '')}\n"
+                f"最终目标：{item.get('plan', {}).get('goal', '')}\n"
+                f"下一步：{item.get('plan', {}).get('next_step', '')}"
+            )
+    except Exception:
+        return ""
     return "\n\n".join(lines)
 
 
 def append_conversation(
     runtime_root: str,
+    username: str,
     project_name: str,
     conversation_id: str,
     goal: str,
     context: str,
     result: AgentRunResult,
 ) -> Path:
-    path = conversation_path(runtime_root, project_name, conversation_id)
+    path = conversation_path(runtime_root, username, project_name, conversation_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     record = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -242,9 +309,9 @@ def append_conversation(
     return path
 
 
-def export_plan(runtime_root: str, project_name: str, result: AgentRunResult, run_id: str | None = None) -> dict[str, Path]:
-    ensure_project_runtime_dirs(runtime_root, project_name)
-    output_dir = Path(runtime_root) / "output" / project_name
+def export_plan(runtime_root: str, username: str, project_name: str, result: AgentRunResult, run_id: str | None = None) -> dict[str, Path]:
+    ensure_project_runtime_dirs(runtime_root, username, project_name)
+    output_dir = Path(runtime_root) / "user" / username / "project" / project_name / "output"
     run_id = run_id or runtime_timestamp()
     json_path = output_dir / f"{run_id}.json"
     markdown_path = output_dir / f"{run_id}.md"
@@ -269,22 +336,26 @@ def export_plan(runtime_root: str, project_name: str, result: AgentRunResult, ru
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     markdown_path.write_text(format_plan_markdown(result), encoding="utf-8")
-    update_output_index(runtime_root, project_name, run_id, result, json_path, markdown_path)
+    update_output_index(runtime_root, username, project_name, run_id, result, json_path, markdown_path)
     return {"json": json_path, "markdown": markdown_path}
 
 
 def update_output_index(
     runtime_root: str,
+    username: str,
     project_name: str,
     run_id: str,
     result: AgentRunResult,
     json_path: Path,
     markdown_path: Path,
 ) -> Path:
-    output_dir = Path(runtime_root) / "output" / project_name
+    output_dir = Path(runtime_root) / "user" / username / "project" / project_name / "output"
     index_path = output_dir / "index.json"
     if index_path.exists():
-        data = json.loads(index_path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"project": project_name, "runs": []}
     else:
         data = {"project": project_name, "runs": []}
 
@@ -331,6 +402,7 @@ def format_plan_markdown(result: AgentRunResult) -> str:
 
 def append_run_log(
     runtime_root: str,
+    username: str,
     project_name: str,
     run_id: str,
     goal: str,
@@ -338,8 +410,8 @@ def append_run_log(
     elapsed_seconds: float,
     mode: str,
 ) -> Path:
-    ensure_project_runtime_dirs(runtime_root, project_name)
-    path = Path(runtime_root) / "log" / project_name / "runs.jsonl"
+    ensure_project_runtime_dirs(runtime_root, username, project_name)
+    path = Path(runtime_root) / "user" / username / "project" / project_name / "log" / "runs.jsonl"
     record = {
         "run_id": run_id,
         "status": "success",
@@ -358,6 +430,7 @@ def append_run_log(
 
 def append_failure_log(
     runtime_root: str,
+    username: str,
     project_name: str,
     run_id: str,
     goal: str,
@@ -366,8 +439,8 @@ def append_failure_log(
     elapsed_seconds: float,
     mode: str = "",
 ) -> Path:
-    ensure_project_runtime_dirs(runtime_root, project_name)
-    path = Path(runtime_root) / "log" / project_name / "runs.jsonl"
+    ensure_project_runtime_dirs(runtime_root, username, project_name)
+    path = Path(runtime_root) / "user" / username / "project" / project_name / "log" / "runs.jsonl"
     record = {
         "run_id": run_id,
         "status": "failed",
@@ -397,9 +470,9 @@ def cache_key(*parts: str) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
-def search_cache_path(runtime_root: str, project_name: str) -> Path:
-    ensure_project_runtime_dirs(runtime_root, project_name)
-    return Path(runtime_root) / "cache" / project_name / "search.json"
+def search_cache_path(runtime_root: str, username: str, project_name: str) -> Path:
+    ensure_project_runtime_dirs(runtime_root, username, project_name)
+    return Path(runtime_root) / "user" / username / "project" / project_name / "cache" / "search.json"
 
 
 def parse_cache_datetime(value: str) -> datetime | None:
@@ -429,65 +502,91 @@ def is_cache_item_expired(item: dict, now: datetime | None = None) -> bool:
 
 def load_cached_search_results(
     runtime_root: str,
+    username: str,
     project_name: str,
     provider: str,
     query: str,
     max_results: int,
 ) -> list[SearchResult] | None:
-    path = search_cache_path(runtime_root, project_name)
+    path = search_cache_path(runtime_root, username, project_name)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    key = cache_key(provider, query, str(max_results))
-    item = data.get(key)
-    if not item:
-        return None
-    if is_cache_item_expired(item):
-        data.pop(key, None)
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return None
-    return [
-        SearchResult(
-            title=str(result.get("title", "")),
-            url=str(result.get("url", "")),
-            content=str(result.get("content", "")),
-        )
-        for result in item.get("results", [])
-    ]
+    with CACHE_LOCK:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        key = cache_key(provider, query, str(max_results))
+        item = data.get(key)
+        if not item:
+            return None
+        if is_cache_item_expired(item):
+            data.pop(key, None)
+            try:
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            return None
+        return [
+            SearchResult(
+                title=str(result.get("title", "")),
+                url=str(result.get("url", "")),
+                content=str(result.get("content", "")),
+            )
+            for result in item.get("results", [])
+        ]
 
 
 def save_cached_search_results(
     runtime_root: str,
+    username: str,
     project_name: str,
     provider: str,
     query: str,
     max_results: int,
     results: list[SearchResult],
 ) -> Path:
-    path = search_cache_path(runtime_root, project_name)
-    data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    key = cache_key(provider, query, str(max_results))
-    created_at = datetime.now(timezone.utc).isoformat()
-    data[key] = {
-        "provider": provider,
-        "query": query,
-        "max_results": max_results,
-        "created_at": created_at,
-        "expires_at": cache_expires_at(created_at),
-        "results": [
-            {"title": result.title, "url": result.url, "content": result.content}
-            for result in results
-        ],
-    }
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = search_cache_path(runtime_root, username, project_name)
+    with CACHE_LOCK:
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        key = cache_key(provider, query, str(max_results))
+        created_at = datetime.now(timezone.utc).isoformat()
+        data[key] = {
+            "provider": provider,
+            "query": provider,
+            "max_results": max_results,
+            "created_at": created_at,
+            "expires_at": cache_expires_at(created_at),
+            "results": [
+                {"title": result.title, "url": result.url, "content": result.content}
+                for result in results
+            ],
+        }
+        try:
+            temp_path = path.with_suffix(".tmp")
+            temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            if temp_path.exists():
+                if path.exists():
+                    path.unlink()
+                temp_path.rename(path)
+        except Exception:
+            pass
     return path
 
 
-def list_cache_entries(runtime_root: str, project_name: str) -> list[dict]:
-    path = search_cache_path(runtime_root, project_name)
+def list_cache_entries(runtime_root: str, username: str, project_name: str) -> list[dict]:
+    path = search_cache_path(runtime_root, username, project_name)
     entries = []
     if path.exists():
-        data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
         for key, item in data.items():
             entries.append(
                 {
@@ -504,9 +603,9 @@ def list_cache_entries(runtime_root: str, project_name: str) -> list[dict]:
     return entries
 
 
-def clear_cache(runtime_root: str, project_name: str) -> int:
-    ensure_project_runtime_dirs(runtime_root, project_name)
-    cache_dir = Path(runtime_root) / "cache" / project_name
+def clear_cache(runtime_root: str, username: str, project_name: str) -> int:
+    ensure_project_runtime_dirs(runtime_root, username, project_name)
+    cache_dir = Path(runtime_root) / "user" / username / "project" / project_name / "cache"
     removed = 0
     for path in cache_dir.iterdir():
         if path.name == ".gitkeep":

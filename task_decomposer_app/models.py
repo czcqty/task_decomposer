@@ -22,8 +22,6 @@ class Skill:
     name: str
     content: str
     path: str
-    scope: str = "global"
-    owner: str = "shared"
 
 
 @dataclass

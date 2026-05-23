@@ -11,21 +11,19 @@ __pycache__/
 venv/
 env/
 
-# Local environment and secrets
-.env
-.env.*
-!.env.example
-
-# Runtime data
-project/users/
-project/conversation/**/*.jsonl
-project/output/**/*.md
-project/output/**/*.json
-project/cache/**/*.json
-project/log/**/*.jsonl
-
 # OS and editor files
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# Build and local configurations
+/mascot_loader_debug.log
+
+# User-Project Static Configs (Ignore all custom users except demo)
+config/user/*
+!config/user/demo/
+
+# User-Project Dynamic Runtime Data (Ignore all custom users except demo)
+runtime/user/*
+!runtime/user/demo/
