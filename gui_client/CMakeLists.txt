@@ -27,6 +27,18 @@ add_executable(TaskDecomposerGUI
     main.cpp
     mainwindow.h
     mainwindow.cpp
+    configdialog.h
+    configdialog.cpp
+    taskcanvas.h
+    taskcanvas.cpp
+    taskcarditem.h
+    taskcarditem.cpp
+    relationshipline.h
+    relationshipline.cpp
+    taskdetailpanel.h
+    taskdetailpanel.cpp
+    theme.h
+    theme.cpp
 )
 
 target_link_libraries(TaskDecomposerGUI PRIVATE ${QT_LIBRARIES})

@@ -29,6 +29,7 @@ from task_decomposer_app.runtime import (
     start_timer,
     UserRuntimeConfig,
     KEY_ROTATOR,
+    user_config_path,
 )
 from task_decomposer_app.search import SearchService
 from task_decomposer_app.skills import SkillRegistry
@@ -493,14 +494,25 @@ def run_core_decomposition(
     tasks_list = []
     for t in result.plan.tasks:
         tasks_list.append({
+            "task_id": t.task_id,
             "title": t.title,
             "action": t.action,
-            "output": t.output
+            "output": t.output,
+            "status": t.status,
+        })
+
+    relations_list = []
+    for r in result.plan.relations:
+        relations_list.append({
+            "source_id": r.source_id,
+            "target_id": r.target_id,
+            "relation_type": r.relation_type,
         })
 
     plan_data = {
         "goal": result.plan.goal,
         "tasks": tasks_list,
+        "relations": relations_list,
         "next_step": result.plan.next_step
     }
 
@@ -521,7 +533,7 @@ def get_default_options() -> dict:
         "model": None,
         "base_url": None,
         "skip_clarify": False,
-        "user": "demo",
+        "user": os.getenv("TASK_DECOMPOSER_USER") or os.getenv("USERNAME") or os.getenv("USER") or "demo",
         "project": "demo",
         "project_dir": None,
         "sub_agent": [],

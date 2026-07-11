@@ -42,6 +42,7 @@ class UserRuntimeConfig:
     api_keys: dict[str, list[str]] = field(default_factory=dict)
     model: str = ""
     base_url: str = ""
+    password: str = ""
     raw_data: dict = field(default_factory=dict)
 
 
@@ -134,6 +135,24 @@ def user_config_path(config_root: str, user_name: str) -> Path:
     return Path(config_root) / "user" / safe_name / "config.json"
 
 
+def detect_provider_and_env(api_key: str, base_url: str) -> tuple[str, str]:
+    api_key = api_key.strip()
+    base_url = base_url.strip().lower()
+    
+    # 1. Claude
+    if api_key.startswith("sk-ant-") or "anthropic" in base_url:
+        return "claude", "ANTHROPIC_API_KEY"
+    # 2. OpenAI
+    if "openai" in base_url or api_key.startswith("sk-proj-"):
+        return "openai", "OPENAI_API_KEY"
+    # 3. DeepSeek
+    if "deepseek" in base_url or api_key.startswith("sk-"):
+        return "deepseek", "DEEPSEEK_API_KEY"
+        
+    # Default fallback
+    return "deepseek", "DEEPSEEK_API_KEY"
+
+
 def load_user_runtime_config(config_root: str, user_name: str | None) -> UserRuntimeConfig | None:
     if not user_name:
         return None
@@ -145,19 +164,53 @@ def load_user_runtime_config(config_root: str, user_name: str | None) -> UserRun
     except Exception:
         return None
 
+    key_pool = data.get("key_pool", [])
     api_keys = {}
-    for provider, val in data.get("api_keys", {}).items():
-        if isinstance(val, list):
-            api_keys[provider] = [str(k) for k in val]
-        else:
-            api_keys[provider] = [str(val)]
+    
+    for item in key_pool:
+        provider = str(item.get("provider", "deepseek")).strip().lower()
+        protocol = str(item.get("protocol", "openai")).strip().lower()
+        api_key = str(item.get("api_key", "")).strip()
+        if not api_key:
+            continue
+        
+        env_name = f"{provider.upper()}_API_KEY"
+        if provider == "openai":
+            env_name = "OPENAI_API_KEY"
+        elif provider in ("claude", "anthropic"):
+            env_name = "ANTHROPIC_API_KEY"
+        elif provider == "deepseek":
+            env_name = "DEEPSEEK_API_KEY"
+        elif provider == "custom":
+            env_name = "CUSTOM_API_KEY"
+            
+        if env_name not in api_keys:
+            api_keys[env_name] = []
+        api_keys[env_name].append(api_key)
+
+        # Also register under direct provider name for easy direct lookups
+        if provider not in api_keys:
+            api_keys[provider] = []
+        if api_key not in api_keys[provider]:
+            api_keys[provider].append(api_key)
+
+    # Automatically infer default provider, model, and base_url from the first entry in the key pool
+    default_provider = "deepseek"
+    default_model = "deepseek-chat"
+    default_base_url = "https://api.deepseek.com"
+    if key_pool:
+        first_item = key_pool[0]
+        default_provider = str(first_item.get("provider") or "deepseek").strip().lower()
+        default_model = str(first_item.get("model") or "deepseek-chat").strip()
+        default_base_url = str(first_item.get("base_url") or "").strip()
 
     return UserRuntimeConfig(
         name=user_name,
-        provider=str(data.get("provider") or ""),
+        provider=default_provider,
         api_keys=api_keys,
-        model=str(data.get("model") or ""),
-        base_url=str(data.get("base_url") or ""),
+        model=default_model,
+        base_url=default_base_url,
+        password=str(data.get("password") or ""),
         raw_data=data
     )
 
@@ -165,12 +218,85 @@ def load_user_runtime_config(config_root: str, user_name: str | None) -> UserRun
 def save_user_runtime_config(config_root: str, config: UserRuntimeConfig) -> Path:
     path = user_config_path(config_root, config.name)
     path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # 动态从 key_pool 中重新生成 api_keys 映射
+    key_pool = config.raw_data.get("key_pool", [])
+    
+    # If key_pool is empty but config.api_keys exists (e.g. from CLI onboarding), let's populate key_pool!
+    if not key_pool and config.api_keys:
+        key_pool = []
+        for env_name, keys in config.api_keys.items():
+            if env_name in ("deepseek", "openai", "claude", "custom"):
+                continue
+            val_list = keys if isinstance(keys, list) else [keys]
+            for k in val_list:
+                prov_name = "deepseek"
+                model_name = "deepseek-chat"
+                base_url = ""
+                protocol = "openai"
+                if env_name == "DEEPSEEK_API_KEY":
+                    prov_name = "deepseek"
+                    model_name = "deepseek-chat"
+                    base_url = "https://api.deepseek.com"
+                    protocol = "openai"
+                elif env_name == "OPENAI_API_KEY":
+                    prov_name = "openai"
+                    model_name = "gpt-4o"
+                    base_url = "https://api.openai.com/v1"
+                    protocol = "openai"
+                elif env_name == "ANTHROPIC_API_KEY":
+                    prov_name = "claude"
+                    model_name = "claude-3-5-haiku-latest"
+                    base_url = "https://api.anthropic.com"
+                    protocol = "claude"
+                elif env_name == "CUSTOM_API_KEY":
+                    prov_name = "custom"
+                    model_name = "gpt-4.1-mini"
+                    base_url = ""
+                    protocol = "openai"
+                key_pool.append({
+                    "provider": prov_name,
+                    "protocol": protocol,
+                    "model": model_name,
+                    "api_key": str(k),
+                    "base_url": base_url
+                })
+        config.raw_data["key_pool"] = key_pool
+
+    api_keys = {}
+    for item in key_pool:
+        provider = str(item.get("provider", "deepseek")).strip().lower()
+        protocol = str(item.get("protocol", "openai")).strip().lower()
+        api_key = str(item.get("api_key", "")).strip()
+        if not api_key:
+            continue
+        
+        env_name = f"{provider.upper()}_API_KEY"
+        if provider == "openai":
+            env_name = "OPENAI_API_KEY"
+        elif provider in ("claude", "anthropic"):
+            env_name = "ANTHROPIC_API_KEY"
+        elif provider == "deepseek":
+            env_name = "DEEPSEEK_API_KEY"
+        elif provider == "custom":
+            env_name = "CUSTOM_API_KEY"
+            
+        if env_name not in api_keys:
+            api_keys[env_name] = []
+        api_keys[env_name].append(api_key)
+
+        # Also register under direct provider name for easy direct lookups
+        if provider not in api_keys:
+            api_keys[provider] = []
+        if api_key not in api_keys[provider]:
+            api_keys[provider].append(api_key)
+    
+    config.api_keys = api_keys
+    
     payload = {
         "name": config.name,
-        "provider": config.provider,
-        "api_keys": config.api_keys,
-        "model": config.model,
-        "base_url": config.base_url,
+        "password": config.password,
+        "key_pool": key_pool,
         "search": config.raw_data.get("search", {}) if isinstance(config.raw_data, dict) else {}
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -217,10 +343,32 @@ def resolve_runtime_provider(config: AgentRuntimeConfig | None, user_config: Use
         return None
 
     api_key = None
+    resolved_provider = config.provider.strip().lower()
+    
     if user_config is not None:
-        keys = user_config.api_keys.get(config.provider, [])
+        # 1. 尝试直接以供应商名查找 key
+        keys = user_config.api_keys.get(resolved_provider, [])
+        
+        # 2. 若未精确找到，则根据 Agent 供应商所需的协议类型（claude/anthropic 为 claude，其余默认均为 openai）智能从 key_pool 中寻找符合协议的 API Key
+        if not keys and "key_pool" in user_config.raw_data:
+            target_protocol = "claude" if resolved_provider in ("claude", "anthropic") else "openai"
+            keys = []
+            for item in user_config.raw_data.get("key_pool", []):
+                proto = str(item.get("protocol", "openai")).strip().lower()
+                k = str(item.get("api_key", "")).strip()
+                if proto == target_protocol and k:
+                    keys.append(k)
+                    
+        # 3. 若依然没有，则在 key_pool 中选取任意有 key 的卡片 fallback
+        if not keys and "key_pool" in user_config.raw_data:
+            keys = [
+                str(item.get("api_key", "")).strip()
+                for item in user_config.raw_data.get("key_pool", [])
+                if str(item.get("api_key", "")).strip()
+            ]
+                    
         if keys:
-            api_key = KEY_ROTATOR.get_key(user_config.name, config.provider, keys)
+            api_key = KEY_ROTATOR.get_key(user_config.name, resolved_provider, keys)
             
     if not api_key:
         env_names = []
@@ -235,11 +383,30 @@ def resolve_runtime_provider(config: AgentRuntimeConfig | None, user_config: Use
     if not api_key:
         raise RuntimeError(f"未检测到 {config.name} 的 API Key：{', '.join(env_names) or '未配置 api_key_env'}")
 
+    # 提取 API 属性覆盖与接口协议
+    selected_base_url = config.base_url or None
+    selected_model = config.model or None
+    selected_protocol = "openai"  # 默认协议
+
+    if user_config is not None and "key_pool" in user_config.raw_data:
+        for item in user_config.raw_data.get("key_pool", []):
+            if str(item.get("api_key")).strip() == api_key:
+                if item.get("base_url"):
+                    selected_base_url = str(item.get("base_url")).strip()
+                if item.get("model"):
+                    selected_model = str(item.get("model")).strip()
+                if item.get("protocol"):
+                    selected_protocol = str(item.get("protocol")).strip().lower()
+                break
+
+    # 映射协议至标准的 openai 或 claude 规整名，避开 normalize_provider 校验异常
+    routing_provider = "claude" if selected_protocol == "claude" else "openai"
+
     return build_provider_config(
-        provider=config.provider,
+        provider=routing_provider,
         api_key=api_key,
-        model=config.model or None,
-        base_url=config.base_url or None,
+        model=selected_model,
+        base_url=selected_base_url,
     )
 
 
@@ -288,8 +455,12 @@ def append_conversation(
         "plan": {
             "goal": result.plan.goal,
             "tasks": [
-                {"title": task.title, "action": task.action, "output": task.output}
+                {"task_id": task.task_id, "title": task.title, "action": task.action, "output": task.output, "status": task.status}
                 for task in result.plan.tasks
+            ],
+            "relations": [
+                {"source_id": r.source_id, "target_id": r.target_id, "relation_type": r.relation_type}
+                for r in result.plan.relations
             ],
             "next_step": result.plan.next_step,
             "sources": result.plan.sources,
@@ -319,8 +490,12 @@ def export_plan(runtime_root: str, username: str, project_name: str, result: Age
     payload = {
         "goal": result.plan.goal,
         "tasks": [
-            {"title": task.title, "action": task.action, "output": task.output}
+            {"task_id": task.task_id, "title": task.title, "action": task.action, "output": task.output, "status": task.status}
             for task in result.plan.tasks
+        ],
+        "relations": [
+            {"source_id": r.source_id, "target_id": r.target_id, "relation_type": r.relation_type}
+            for r in result.plan.relations
         ],
         "next_step": result.plan.next_step,
         "sources": result.plan.sources,
@@ -381,13 +556,21 @@ def format_plan_markdown(result: AgentRunResult) -> str:
     for index, task in enumerate(result.plan.tasks, start=1):
         lines.extend(
             [
-                f"## {index}. {task.title}",
+                f"## {index}. [{task.task_id}] {task.title}",
                 "",
                 f"- 行动：{task.action}",
                 f"- 产出：{task.output}",
+                f"- 状态：{task.status}",
                 "",
             ]
         )
+    if result.plan.relations:
+        lines.extend(["## 任务关系", ""])
+        type_labels = {"sequential": "顺序", "parallel": "并行", "blocking": "阻塞", "nesting": "嵌套"}
+        for r in result.plan.relations:
+            label = type_labels.get(r.relation_type, r.relation_type)
+            lines.append(f"- {r.source_id} --[{label}]--> {r.target_id}")
+        lines.append("")
     lines.extend(["## 下一步", "", result.plan.next_step, ""])
     if result.plan.sources:
         lines.extend(["## 参考来源", ""])

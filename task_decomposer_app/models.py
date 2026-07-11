@@ -33,9 +33,19 @@ class SearchResult:
 
 @dataclass
 class DecomposedTask:
+    task_id: str
     title: str
     action: str
     output: str
+    status: str = "pending"  # pending | in_progress | done | blocked
+
+
+@dataclass
+class TaskRelation:
+    """两个任务之间的关系。"""
+    source_id: str       # 关系起点任务 ID
+    target_id: str       # 关系终点任务 ID
+    relation_type: str   # "sequential" | "parallel" | "blocking" | "nesting"
 
 
 @dataclass
@@ -43,6 +53,7 @@ class Plan:
     goal: str
     tasks: list[DecomposedTask]
     next_step: str
+    relations: list[TaskRelation] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
 
 
