@@ -1,0 +1,26 @@
+{
+  "1fac6a33b9e3f573f03f8f656f95604385f576c60f9f8f4d261b9fd4feeed474": {
+    "provider": "duckduckgo",
+    "query": "duckduckgo",
+    "max_results": 5,
+    "created_at": "2026-05-23T17:26:39.840910+00:00",
+    "expires_at": "2026-05-24T17:26:39.840910+00:00",
+    "results": []
+  },
+  "a2b0960daee5d1823c2ce225c2e18c7645846be1d7ebafff905e5e9fb0054ebe": {
+    "provider": "duckduckgo",
+    "query": "duckduckgo",
+    "max_results": 5,
+    "created_at": "2026-05-23T17:27:19.269297+00:00",
+    "expires_at": "2026-05-24T17:27:19.269297+00:00",
+    "results": []
+  },
+  "3e5123ff333d0fa8147b7415ad3b7d5a3ae4ee5c3750061dfef91cb537d047c5": {
+    "provider": "duckduckgo",
+    "query": "duckduckgo",
+    "max_results": 5,
+    "created_at": "2026-05-23T17:27:39.929359+00:00",
+    "expires_at": "2026-05-24T17:27:39.929359+00:00",
+    "results": []
+  }
+}
